@@ -1,6 +1,5 @@
-cargo-features = ["codegen-backend"]
 [package]
-name = "zigup-rust"
+name = "zman"
 version = "0.1.0"
 edition = "2021"
 description = "Manage Zig installations"
@@ -11,12 +10,9 @@ directories = "5.0.1"
 duma = "0.2.0"
 eyre = "0.6.12"
 reqwest = { version = "0.12.1", features = ["blocking", "json"] }
+semver = "1.0.22"
 serde_json = "1.0.114"
 tempfile = "3.10.1"
-
-[profile.dev]
-codegen-backend = "cranelift"
-debug = 0
 
 [profile.release]
 opt-level = "z"
@@ -24,5 +20,3 @@ strip = true
 lto = true
 codegen-units = 1
 panic = "abort"
-split-debuginfo = "off"
-codegen-backend = "cranelift"

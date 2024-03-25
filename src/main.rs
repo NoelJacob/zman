@@ -1,11 +1,12 @@
 use clap::{value_parser, ColorChoice, Parser, Subcommand, ValueHint};
 use directories::{BaseDirs, ProjectDirs};
-use eyre::{ContextCompat, eyre, OptionExt, WrapErr};
+use eyre::{OptionExt, WrapErr, Result, eyre, bail, ContextCompat};
 use reqwest::blocking::get;
 use serde_json::Value;
 use std::env::consts::{ARCH, OS};
 use std::path::PathBuf;
 use std::process::exit;
+use semver::{Version, VersionReq};
 
 #[derive(Parser)]
 #[command(version, about, color = ColorChoice::Auto, help_expected = true, disable_help_subcommand = true, long_about = None)]
@@ -48,7 +49,7 @@ enum Cmd {
     },
     /// List all installed versions.
     List,
-    /// Prevent a version from being cleaned by zigup clean. Can be reverted by running clean with the particular version.
+    /// Prevent a version from being cleaned by clean command. Can be reverted by running clean with the particular version.
     Keep {
         /// Exact version name or use latest for latest release and master for latest build.
         version: String,
@@ -69,73 +70,112 @@ fn verify_cli() {
     Cli::command().debug_assert()
 }
 
+#[test]
+fn it_parses_ziglang_api() {
+    // let x = parse_ziglang_api("0.11").unwrap();
+    dbg!(VersionReq::parse("0.11").unwrap().matches(&Version::parse("0.11.100").unwrap()));
+    // dbg!(x);
+}
 
+fn parse_ziglang_api(version: &str) -> Result<(String, String)> {
+    let _e = "API could not be parsed";
 
-fn parse_ziglang_api(version: &str) -> (String, String) {
-    let api = get("https://ziglang.org/download/index.json").expect("Cannot connect to ziglang.org API")
-        .json::<Value>().expect("Cannot convert response to JSON");
+    let arch = format!("/{}-{}/tarball", ARCH, OS);
+    let _e_arch = || eyre!("Zig binary for {} target not available", arch);
+
+    let api = get("https://ziglang.org/download/index.json").wrap_err_with(|| "Cannot connect to ziglang.org API")?
+        .json::<Value>().wrap_err_with(|| _e)?;
 
     match version {
         "master" => {
-            let master = api.get("master").expect("Cannot get master from API");
-            let real_version = master
-                .get("version").expect("Cannot get master.version from API")
-                .to_string();
-            let url = master
-                .pointer(&*format!("{}-{}/tarball", ARCH, OS)).expect(&*format!(
-                    "Cannot get master.{}-{}.tarball from API",
-                    ARCH, OS
-                ))
-                .to_string();
-            (real_version, url)
+            let real_version = api
+                .pointer("/master/version").ok_or_eyre(_e)?
+                .as_str().ok_or_eyre(_e)?.to_string();
+            let url = api
+                .pointer(&format!("/master{}",arch)).ok_or_else(_e_arch)?
+                .as_str().ok_or_eyre(_e)?.to_string();
+            Ok((real_version, url))
         }
         "latest" => {
-            let (_, latest) = api
-                .as_object().expect("Cannot parse API")
-                .iter().next().expect("Cannot get 2nd element from API");
-            let real_version = latest
-                .get("version").expect("Cannot get latest.version from API")
+            let api_map = api
+                .as_object().ok_or_eyre(_e)?;
+            // TODO: Compare dates in for loop
+            let mut latest: Option<&Value> = None;
+            let mut latest_date: Option<&str> = None;
+            let mut latest_version: Option<&str> = None;
+            for (ver, val) in api_map {
+                if ver != "master" {
+                    match latest_date {
+                        None => {
+                            let date = val.pointer("/date").ok_or_eyre(_e)?
+                                .as_str().ok_or_eyre(_e)?;
+                            latest = Some(val);
+                            latest_date = Some(date);
+                            latest_version = Some(ver);
+                        }
+                        Some(x) => {
+                            let val_date = val.pointer("/date").ok_or_eyre(_e)?
+                                .as_str().ok_or_eyre(_e)?;
+                            if x < val_date {
+                                latest = Some(val);
+                                latest_date = Some(val_date);
+                                latest_version = Some(ver);
+                            }
+                        }
+                    }
+            }
+            }
+            let real_version = latest_version.ok_or_eyre(_e)?
                 .to_string();
-            let url = latest
-                .get(format!("{}-{}/tarball", ARCH, OS)).expect(&*format!(
-                    "Cannot get latest.{}-{}.tarball from API",
-                    ARCH, OS
-                ))
-                .to_string();
-            (real_version, url)
+            let url = latest.ok_or_eyre(_e)?
+                .pointer(&arch).ok_or_else(_e_arch)?
+                .as_str().ok_or_eyre(_e)?.to_string();
+            Ok((real_version, url))
         }
         version => {
-            let (_, latest) = api
-                .as_object().expect("Cannot parse API")
-                .iter()
-                .find(|(key, _)| key.starts_with(version)).expect(&*format!("Cannot get {} from API", version));
-            let real_version = latest
-                .get("version").expect(&*format!("Cannot get {}.version from API", version))
+            let api_map= api
+                .as_object().ok_or_eyre(_e)?;
+            let mut latest_matching_version_list: Option<Vec<Version>> = None;
+            let sem_version = VersionReq::parse(&format!("={}",version))?;
+            // api_map.remove()
+            for (ver, _) in api_map {
+                if ver != "master" {
+                    match latest_matching_version_list.take() {
+                        None => {
+                            let sem_ver = Version::parse(ver)?;
+                            latest_matching_version_list = Some([sem_ver].to_vec());
+                        }
+                        Some(mut x) => {
+                            let sem_ver = Version::parse(ver)?;
+                            if sem_version.matches(&sem_ver) {
+                                x.push(sem_ver);
+                                latest_matching_version_list = Some(x);
+                            }
+                        }
+                    }
+                }
+            }
+            dbg!(&latest_matching_version_list);
+            let real_version = latest_matching_version_list.ok_or_eyre(_e)?
+                .iter().max()
+                .ok_or_else(|| eyre!("Version {} not found", version))?
                 .to_string();
-            let url = latest
-                .get(format!("{}-{}/tarball", ARCH, OS)).expect(&*format!(
-                    "Cannot get {}.{}-{}.tarball from API",
-                    version, ARCH, OS
-                ))
-                .to_string();
-            (real_version, url)
+            let url = api
+                .pointer(&format!("/{}{}", real_version, arch)).ok_or_else(_e_arch)?
+                .as_str().ok_or_eyre(_e)?.to_string();
+            Ok((real_version, url))
         }
     }
 }
 
-fn fetch_version_if_needed(version: &str, location: &PathBuf) -> eyre::Result<()> {
-    let url = format!("https://ziglang.org/download/{}.tar.xz", version);
-    let fname = location.join(version);
+// fn make_shims()
 
-    Ok(())
-}
-
-fn main() {
+fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let default_install = ProjectDirs::from("com", "", "zigup").expect("Cannot select default project dir")
+    let default_install = ProjectDirs::from("com", "", "zman").ok_or_eyre("Default project dir could not be selected")?
         .data_dir()
-        .canonicalize().expect("Cannot canonicalize default data dir");
+        .canonicalize()?;
     // TODO: Elevation
     let default_link = PathBuf::from("/usr/bin");
 
@@ -147,28 +187,29 @@ fn main() {
             no_dropins,
             version,
         } => {
-            let install_location = if let Some(x) = link {
-                x
-            } else if user {
-                BaseDirs::new().expect("Cannot get $HOME")
-                    .executable_dir().expect("Cannot get local bin home")
-                    .canonicalize().expect("Cannot canonicalize local bin home")
-            } else {
-                default_link
+            let install_location =  match link {
+                None if user => BaseDirs::new().ok_or_eyre("$HOME could not be found")?
+                    .executable_dir().ok_or_eyre("Local bin dir could not be found")?
+                    .canonicalize()?,
+                None => default_install,
+                Some(x) => x,
             };
 
-            let (real_version, url) = parse_ziglang_api(&version);
+            let (real_version, url) = parse_ziglang_api(&version)?;
             let version_install_location = install_location.join(real_version);
-            if version_install_location.try_exists().expect(&*format!("Cannot check if {:?} exists", version_install_location)) {
-                //     TODO: copy zig to
+            if version_install_location.try_exists().wrap_err_with(|| eyre!("Cannot check if {:?} exists", version_install_location))? {
+                // TODO: make shims
+
+            } else {
+                // TODO: download zig
             }
         }
-        Cmd::Fetch { .. } => invalid(),
-        Cmd::Clean { .. } => invalid(),
-        Cmd::List => invalid(),
-        Cmd::Keep { .. } => invalid(),
-        Cmd::Run { .. } => invalid(),
+        Cmd::Fetch { .. } => bail!("Not implemented"),
+        Cmd::Clean { .. } => bail!("Not implemented"),
+        Cmd::List => bail!("Not implemented"),
+        Cmd::Keep { .. } => bail!("Not implemented"),
+        Cmd::Run { .. } => bail!("Not implemented"),
     }
 
-    // Ok(())
+    Ok(())
 }
