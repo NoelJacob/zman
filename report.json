@@ -1,0 +1,127 @@
+{
+  "version": 0,
+  "root_name": "zman",
+  "workspace_crates": {
+    "zman": {
+      "full_path": "/home/noel/Dev/zigup-rust/Cargo.toml",
+      "dependencies": {
+        "clap": {
+          "original_features": [
+            "error-context",
+            "color",
+            "usage",
+            "std",
+            "wrap_help",
+            "help",
+            "derive"
+          ],
+          "successfully_removed_features": [
+            "help",
+            "error-context",
+            "usage",
+            "wrap_help"
+          ],
+          "unsuccessfully_removed_features": [
+            "color",
+            "std",
+            "derive"
+          ]
+        },
+        "console": {
+          "original_features": [
+            "unicode-width",
+            "ansi-parsing"
+          ],
+          "successfully_removed_features": [
+            "ansi-parsing",
+            "unicode-width"
+          ],
+          "unsuccessfully_removed_features": []
+        },
+        "tar": {
+          "original_features": [
+            "xattr"
+          ],
+          "successfully_removed_features": [
+            "xattr"
+          ],
+          "unsuccessfully_removed_features": []
+        },
+        "tokio": {
+          "original_features": [
+            "macros",
+            "tokio-macros",
+            "rt-multi-thread",
+            "rt",
+            "num_cpus"
+          ],
+          "successfully_removed_features": [
+            "tokio-macros",
+            "macros",
+            "rt",
+            "num_cpus"
+          ],
+          "unsuccessfully_removed_features": [
+            "rt-multi-thread"
+          ]
+        },
+        "eyre": {
+          "original_features": [
+            "track-caller",
+            "auto-install"
+          ],
+          "successfully_removed_features": [
+            "auto-install",
+            "track-caller"
+          ],
+          "unsuccessfully_removed_features": []
+        },
+        "reqwest": {
+          "original_features": [
+            "json",
+            "http2",
+            "default-tls",
+            "macos-system-configuration",
+            "charset"
+          ],
+          "successfully_removed_features": [
+            "http2",
+            "charset",
+            "default-tls",
+            "macos-system-configuration"
+          ],
+          "unsuccessfully_removed_features": [
+            "json"
+          ]
+        },
+        "sha2": {
+          "original_features": [
+            "std"
+          ],
+          "successfully_removed_features": [
+            "std"
+          ],
+          "unsuccessfully_removed_features": []
+        },
+        "indicatif": {
+          "original_features": [
+            "unicode-width"
+          ],
+          "successfully_removed_features": [
+            "unicode-width"
+          ],
+          "unsuccessfully_removed_features": []
+        },
+        "serde_json": {
+          "original_features": [
+            "std"
+          ],
+          "successfully_removed_features": [
+            "std"
+          ],
+          "unsuccessfully_removed_features": []
+        }
+      }
+    }
+  }
+}

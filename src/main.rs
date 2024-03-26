@@ -1,22 +1,25 @@
+mod download;
+
 use clap::{value_parser, ColorChoice, Parser, Subcommand, ValueHint};
 use directories::{BaseDirs, ProjectDirs};
 use eyre::{bail, ensure, eyre, OptionExt, Result, WrapErr};
-use reqwest::blocking::get;
 use semver::{Version, VersionReq};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::env::consts::{ARCH, OS};
-use std::env::{temp_dir, var};
-use std::fs::{create_dir_all, remove_file, rename, write, File, set_permissions, Permissions};
+use std::env::var;
+use std::fs::{create_dir_all, remove_file, write, File, set_permissions, Permissions, read_dir};
 use std::io::{ErrorKind, Read};
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use tar::Archive;
-use tokio::runtime::Runtime;
-use trauma::download::Status;
-use trauma::{download::Download, downloader::DownloaderBuilder};
-use trauma::downloader::{ProgressBarOpts, StyleOptions};
 use xz2::read::XzDecoder;
+use download::download_file;
+use console::Term;
+use reqwest::Client;
+use tokio::runtime::Runtime;
+use temp_dir::TempDir;
+use fs_extra::dir::{copy, CopyOptions};
 
 #[derive(Parser)]
 #[command(version, about, color = ColorChoice::Auto, help_expected = true, disable_help_subcommand = true, long_about = None)]
@@ -79,8 +82,8 @@ fn it_cli() {
 
 #[test]
 fn it_parse_ziglang_api() {
-    let x = parse_ziglang_api("0.10").unwrap();
-    dbg!(x);
+    // let x = parse_ziglang_api("0.10").unwrap();
+    // dbg!(x);
 }
 
 #[test]
@@ -106,10 +109,8 @@ fn it_sudo() {
 
 #[test]
 fn it_download() {
-    let rt = Runtime::new().unwrap();
-    let x = download_tarxz("https://ziglang.org/download/0.11.0/zig-linux-x86_64-0.11.0.tar.xz");
-    let r = rt.block_on(x).unwrap();
-    dbg!(r);
+    // let x = download_tarxz("https://ziglang.org/download/0.11.0/zig-linux-x86_64-0.11.0.tar.xz");
+    // dbg!(r);
 }
 
 #[test]
@@ -123,12 +124,11 @@ fn it_sha256() {
 
 #[test]
 fn it_extract() {
-    extract_tarxz(
-        &PathBuf::from("/tmp/zig-linux-x86_64-0.11.0.tar.xz"),
-        &PathBuf::from("/tmp/zig"),
-        &PathBuf::from("/tmp/zig/0.11.0"),
-    )
-    .unwrap();
+    // extract_tarxz(
+    //     &PathBuf::from("/tmp/zig-linux-x86_64-0.11.0.tar.xz"),
+    //     &PathBuf::from("/tmp/zig")
+    // )
+    // .unwrap();
 }
 
 #[test]
@@ -141,16 +141,17 @@ fn it_symlink() {
     .unwrap();
 }
 
-fn parse_ziglang_api(version: &str) -> Result<(String, String, String)> {
+async fn parse_ziglang_api(client: &Client, version: &str) -> Result<(String, String, String)> {
     let _e = "API could not be parsed";
 
     let tarball = format!("/{}-{}/tarball", ARCH, OS);
     let sha = format!("/{}-{}/shasum", ARCH, OS);
     let _e_arch = || eyre!("Zig binary for {} target not available", tarball);
 
-    let api = get("https://ziglang.org/download/index.json")
+    let api = client.get("https://ziglang.org/download/index.json")
+        .send().await
         .wrap_err_with(|| "Cannot connect to ziglang.org API")?
-        .json::<Value>()
+        .json::<Value>().await
         .wrap_err_with(|| _e)?;
 
     match version {
@@ -281,60 +282,29 @@ fn make_symlink(source: &Path, destination: &Path, no_dropins: bool) -> Result<(
     let dropins = [
         "ar", "cc", "c++", "dlltool", "lib", "ranlib", "objcopy", "rc",
     ];
+    create_dir_all(destination)?;
     match symlink(source.join("zig"), destination.join("zig")) {
         Ok(_) => {
-            println!("Zig added at {:?}", destination);
+            print!("Zig added at {:?}", destination);
             if !no_dropins {
                 add_dropins(destination, dropins)?;
-                println!(
-                    "Zig drop-in tools {} added",
-                    dropins.map(|x| "zig-".to_string() + x).join(", ")
-                );
+                println!(" with drop-in tools");
             }
-            if !var("PATH")?.contains(destination.to_str().ok_or_eyre("Cannot check path")?) {
-                println!(
-                    "Add {:?} to your PATH. Seems like it's not in PATH",
-                    destination
-                );
+            if !var("PATH")?.contains(destination.to_str().ok_or_eyre("Path Invalid")?) {
+                println!("Add it to PATH");
             };
-        }
+        },
         Err(e) if e.kind() == ErrorKind::PermissionDenied => {
             bail!("Permission denied to create symlink at {:?}. Do NOT RUN as root. Try passing a custom symlink directory with --link option", destination)
-        }
-        Err(e) if e.kind() == ErrorKind::NotFound => {
-            create_dir_all(destination)?;
-            make_symlink(source, destination, no_dropins)?;
-        }
+        },
         Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-            println!("Replacing Zig at {:?}", destination);
             remove_file(destination.join("zig"))?;
             rm_dropins(destination, dropins)?;
             make_symlink(source, destination, no_dropins)?;
-        }
+        },
         Err(e) => bail!(e),
     };
     Ok(())
-}
-
-async fn download_tarxz(url: &str) -> Result<PathBuf> {
-    let temp = temp_dir();
-    let dl = Download::try_from(url)?;
-    let file_path = temp.join(&dl.filename);
-    let mut style = StyleOptions::default();
-    style.set_main(ProgressBarOpts::hidden());
-    dbg!(&style);
-    let downloader = DownloaderBuilder::new()
-        .directory(temp)
-        // .(Duration::from_secs(20))
-        .concurrent_downloads(4)
-        // .timeout(Duration::from_secs(60))
-        .style_options(style)
-        .build();
-    match downloader.download(&[dl]).await[0].status() {
-        Status::Success => {}
-        x => bail!("Download status {:?}", x),
-    };
-    Ok(file_path)
 }
 
 fn check_sha256(file: &PathBuf, hash: String) -> Result<()> {
@@ -353,23 +323,23 @@ fn check_sha256(file: &PathBuf, hash: String) -> Result<()> {
     Ok(())
 }
 
-fn extract_tarxz(
-    file: &Path,
-    install_location: &Path,
-    version_install_location: &Path,
-) -> Result<()> {
+fn extract_and_copy(file: &Path, extract_location: PathBuf, install_location: &PathBuf) -> Result<()> {
     let _e = || eyre!("Extracting {:?} failed", file);
     let xz = XzDecoder::new(File::open(file).wrap_err_with(_e)?);
     let mut tar = Archive::new(xz);
-    tar.unpack(install_location)?;
-    let file_name = file
-        .file_name()
-        .ok_or_else(_e)?
-        .to_str()
-        .ok_or_else(_e)?
-        .replacen(".tar.xz", "", 1);
-    let unpacked_folder = install_location.join(file_name);
-    rename(unpacked_folder, version_install_location).wrap_err_with(_e)?;
+    let t = Term::stdout();
+    t.write_line("Extracting Zig...")?;
+    tar.unpack(&extract_location)?;
+    t.clear_line()?;
+    t.write_line("Installing Zig...")?;
+    create_dir_all(install_location)?;
+    let mut opts = CopyOptions::new();
+    opts.overwrite = true;
+    opts.content_only = true;
+    let inside_dir = read_dir(extract_location)?.next().ok_or_eyre("Extracted directory not found")??;
+    create_dir_all(install_location)?;
+    copy(inside_dir.path(), install_location, &opts)?;
+    t.clear_line()?;
     Ok(())
 }
 
@@ -405,9 +375,16 @@ fn main() -> Result<()> {
                 None => install_default,
             };
 
-            let (specific_version, url, shasum) = parse_ziglang_api(&version)?;
-            let version_install_location = install_location.join(&specific_version);
-            if version_install_location
+            let client = Client::new();
+            let rt = Runtime::new()?;
+
+            let (specific_version, url, shasum) = rt.block_on(parse_ziglang_api(&client, &version))?;
+            let specific_install_location = if "master" == &version {
+                install_location.join("master")
+            } else {
+                install_location.join(&specific_version)
+            };
+            if version != "master" && specific_install_location
                 .join("zig")
                 .try_exists()
                 .wrap_err_with(|| {
@@ -415,23 +392,15 @@ fn main() -> Result<()> {
                 })?
             {
                 println!("Zig version {} already downloaded", specific_version);
-                make_symlink(&version_install_location, link_location, no_dropins)?;
             } else {
-                let rt = Runtime::new()?;
-                let archive = rt
-                    .block_on(download_tarxz(&url))
-                    .wrap_err_with(|| eyre!("Downloading {:?} failed", specific_version))?;
-                match check_sha256(&archive, shasum) {
-                    Ok(_) => {}
-                    Err(_) => {
-                        remove_file(&archive)?;
-                        bail!("Checksum failed for {:?}", specific_version)
-                    }
-                };
-                extract_tarxz(&archive, install_location, &version_install_location)?;
-                println!("Downloaded {:?}", specific_version);
-                make_symlink(&version_install_location, link_location, no_dropins)?;
+                let temp = TempDir::with_prefix("zman")?;
+                let extract_location = temp.child(&version);
+                let tarxz = temp.child(format!("zig-{}.tar.xz", version));
+                rt.block_on(download_file(&client, &url, &tarxz)).wrap_err_with(|| eyre!("Downloading {:?} failed", specific_version))?;
+                check_sha256(&tarxz, shasum).wrap_err_with(|| eyre!("Checksum failed for {:?}", specific_version))?;
+                extract_and_copy(&tarxz, extract_location, &specific_install_location)?;
             }
+            make_symlink(&specific_install_location, link_location, no_dropins)?;
         }
         Cmd::Fetch { .. } => bail!("Not implemented"),
         Cmd::Clean { .. } => bail!("Not implemented"),
