@@ -5,7 +5,7 @@
 ## Usage
 `<VERSION>` can be a version number like `0.12.0`, `latest` or `master`.
 
-`zman default [OPTIONS] <VERSION>`: Download and set a Zig version as default
+`zman default [OPTIONS] <VERSION>`: Download and set a Zig version as default. Also adds shims like zig-cc and zig-c++
 ```bash
 zman default latest
 zman default master
