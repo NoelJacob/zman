@@ -1,6 +1,6 @@
 # Zig Manager
 
-> Currently only `default` command with Linux and MacOS done.
+> Currently only `default` command with Linux and MacOS done. I'm rewriting in Zig ASAP : )
 
 ## Usage
 `<VERSION>` can be a version number like `0.12.0`, `latest` or `master`.
