@@ -1,12 +1,22 @@
 use clap::{value_parser, ColorChoice, Parser, Subcommand, ValueHint};
 use directories::{BaseDirs, ProjectDirs};
-use eyre::{OptionExt, WrapErr, Result, eyre, bail, ContextCompat};
+use eyre::{bail, ensure, eyre, OptionExt, Result, WrapErr};
 use reqwest::blocking::get;
-use serde_json::Value;
-use std::env::consts::{ARCH, OS};
-use std::path::PathBuf;
-use std::process::exit;
 use semver::{Version, VersionReq};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::env::consts::{ARCH, OS};
+use std::env::{temp_dir, var};
+use std::fs::{create_dir_all, remove_file, rename, write, File, set_permissions, Permissions};
+use std::io::{ErrorKind, Read};
+use std::os::unix::fs::{PermissionsExt, symlink};
+use std::path::{Path, PathBuf};
+use tar::Archive;
+use tokio::runtime::Runtime;
+use trauma::download::Status;
+use trauma::{download::Download, downloader::DownloaderBuilder};
+use trauma::downloader::{ProgressBarOpts, StyleOptions};
+use xz2::read::XzDecoder;
 
 #[derive(Parser)]
 #[command(version, about, color = ColorChoice::Auto, help_expected = true, disable_help_subcommand = true, long_about = None)]
@@ -25,9 +35,6 @@ enum Cmd {
         #[arg(long, value_parser = value_parser!(PathBuf), value_hint = ValueHint::DirPath, value_name = "DIR")]
         /// Custom symlink directory.
         link: Option<PathBuf>,
-        #[arg(long, conflicts_with = "link")]
-        /// Create the symlink in user installation directory.
-        user: bool,
         #[arg(long)]
         /// Do no create shims like zig-cc and zig-c++ for Zig drop-in replacements.
         no_dropins: bool,
@@ -65,41 +72,111 @@ enum Cmd {
 }
 
 #[test]
-fn verify_cli() {
+fn it_cli() {
     use clap::CommandFactory;
     Cli::command().debug_assert()
 }
 
 #[test]
-fn it_parses_ziglang_api() {
-    // let x = parse_ziglang_api("0.11").unwrap();
-    dbg!(VersionReq::parse("0.11").unwrap().matches(&Version::parse("0.11.100").unwrap()));
-    // dbg!(x);
+fn it_parse_ziglang_api() {
+    let x = parse_ziglang_api("0.10").unwrap();
+    dbg!(x);
 }
 
-fn parse_ziglang_api(version: &str) -> Result<(String, String)> {
+#[test]
+fn it_sudo() {
+    let x = ProjectDirs::from("com", "", "zman")
+        .ok_or_eyre("Default project directory could not be selected")
+        .unwrap();
+    let install_default = x.data_dir();
+    let x = BaseDirs::new()
+        .ok_or_eyre("User home directory could not be found")
+        .unwrap();
+    let link_default = x
+        .executable_dir()
+        .ok_or_eyre("Local bin directory could not be found")
+        .unwrap();
+
+    println!(
+        "{} {}",
+        install_default.to_str().unwrap(),
+        link_default.to_str().unwrap()
+    );
+}
+
+#[test]
+fn it_download() {
+    let rt = Runtime::new().unwrap();
+    let x = download_tarxz("https://ziglang.org/download/0.11.0/zig-linux-x86_64-0.11.0.tar.xz");
+    let r = rt.block_on(x).unwrap();
+    dbg!(r);
+}
+
+#[test]
+fn it_sha256() {
+    check_sha256(
+        &PathBuf::from("/tmp/zig-linux-x86_64-0.11.0.tar.xz"),
+        "2d00e789fec4f71790a6e7bf83ff91d564943c5ee843c5fd966efc474b423047".to_string(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn it_extract() {
+    extract_tarxz(
+        &PathBuf::from("/tmp/zig-linux-x86_64-0.11.0.tar.xz"),
+        &PathBuf::from("/tmp/zig"),
+        &PathBuf::from("/tmp/zig/0.11.0"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn it_symlink() {
+    make_symlink(
+        &PathBuf::from("/tmp/zig/0.11.0"),
+        &PathBuf::from("/tmp/bin"),
+        false,
+    )
+    .unwrap();
+}
+
+fn parse_ziglang_api(version: &str) -> Result<(String, String, String)> {
     let _e = "API could not be parsed";
 
-    let arch = format!("/{}-{}/tarball", ARCH, OS);
-    let _e_arch = || eyre!("Zig binary for {} target not available", arch);
+    let tarball = format!("/{}-{}/tarball", ARCH, OS);
+    let sha = format!("/{}-{}/shasum", ARCH, OS);
+    let _e_arch = || eyre!("Zig binary for {} target not available", tarball);
 
-    let api = get("https://ziglang.org/download/index.json").wrap_err_with(|| "Cannot connect to ziglang.org API")?
-        .json::<Value>().wrap_err_with(|| _e)?;
+    let api = get("https://ziglang.org/download/index.json")
+        .wrap_err_with(|| "Cannot connect to ziglang.org API")?
+        .json::<Value>()
+        .wrap_err_with(|| _e)?;
 
     match version {
         "master" => {
-            let real_version = api
-                .pointer("/master/version").ok_or_eyre(_e)?
-                .as_str().ok_or_eyre(_e)?.to_string();
+            let specific_version = api
+                .pointer("/master/version")
+                .ok_or_eyre(_e)?
+                .as_str()
+                .ok_or_eyre(_e)?
+                .to_string();
             let url = api
-                .pointer(&format!("/master{}",arch)).ok_or_else(_e_arch)?
-                .as_str().ok_or_eyre(_e)?.to_string();
-            Ok((real_version, url))
+                .pointer(&format!("/master{}", tarball))
+                .ok_or_else(_e_arch)?
+                .as_str()
+                .ok_or_eyre(_e)?
+                .to_string();
+            let shasum = api
+                .pointer(&format!("/master{}", sha))
+                .ok_or_else(_e_arch)?
+                .as_str()
+                .ok_or_eyre(_e)?
+                .to_string();
+            Ok((specific_version, url, shasum))
         }
         "latest" => {
-            let api_map = api
-                .as_object().ok_or_eyre(_e)?;
-            // TODO: Compare dates in for loop
+            let api_map = api.as_object().ok_or_eyre(_e)?;
             let mut latest: Option<&Value> = None;
             let mut latest_date: Option<&str> = None;
             let mut latest_version: Option<&str> = None;
@@ -107,15 +184,21 @@ fn parse_ziglang_api(version: &str) -> Result<(String, String)> {
                 if ver != "master" {
                     match latest_date {
                         None => {
-                            let date = val.pointer("/date").ok_or_eyre(_e)?
-                                .as_str().ok_or_eyre(_e)?;
+                            let date = val
+                                .pointer("/date")
+                                .ok_or_eyre(_e)?
+                                .as_str()
+                                .ok_or_eyre(_e)?;
                             latest = Some(val);
                             latest_date = Some(date);
                             latest_version = Some(ver);
                         }
                         Some(x) => {
-                            let val_date = val.pointer("/date").ok_or_eyre(_e)?
-                                .as_str().ok_or_eyre(_e)?;
+                            let val_date = val
+                                .pointer("/date")
+                                .ok_or_eyre(_e)?
+                                .as_str()
+                                .ok_or_eyre(_e)?;
                             if x < val_date {
                                 latest = Some(val);
                                 latest_date = Some(val_date);
@@ -123,85 +206,231 @@ fn parse_ziglang_api(version: &str) -> Result<(String, String)> {
                             }
                         }
                     }
-            }
-            }
-            let real_version = latest_version.ok_or_eyre(_e)?
-                .to_string();
-            let url = latest.ok_or_eyre(_e)?
-                .pointer(&arch).ok_or_else(_e_arch)?
-                .as_str().ok_or_eyre(_e)?.to_string();
-            Ok((real_version, url))
-        }
-        version => {
-            let api_map= api
-                .as_object().ok_or_eyre(_e)?;
-            let mut latest_matching_version_list: Option<Vec<Version>> = None;
-            let sem_version = VersionReq::parse(&format!("={}",version))?;
-            // api_map.remove()
-            for (ver, _) in api_map {
-                if ver != "master" {
-                    match latest_matching_version_list.take() {
-                        None => {
-                            let sem_ver = Version::parse(ver)?;
-                            latest_matching_version_list = Some([sem_ver].to_vec());
-                        }
-                        Some(mut x) => {
-                            let sem_ver = Version::parse(ver)?;
-                            if sem_version.matches(&sem_ver) {
-                                x.push(sem_ver);
-                                latest_matching_version_list = Some(x);
-                            }
-                        }
-                    }
                 }
             }
-            dbg!(&latest_matching_version_list);
-            let real_version = latest_matching_version_list.ok_or_eyre(_e)?
-                .iter().max()
-                .ok_or_else(|| eyre!("Version {} not found", version))?
+            let specific_version = latest_version
+                .ok_or_eyre("Latest version could not be found")?
+                .to_string();
+            let url = latest
+                .ok_or_eyre(_e)?
+                .pointer(&tarball)
+                .ok_or_else(_e_arch)?
+                .as_str()
+                .ok_or_eyre(_e)?
+                .to_string();
+            let shasum = latest
+                .ok_or_eyre(_e)?
+                .pointer(&sha)
+                .ok_or_else(_e_arch)?
+                .as_str()
+                .ok_or_eyre(_e)?
+                .to_string();
+            Ok((specific_version, url, shasum))
+        }
+        version => {
+            let api_map = api.as_object().ok_or_eyre(_e)?;
+            let version_required = VersionReq::parse(&format!("={}", version))?;
+            let latest_matching_version = api_map
+                .keys()
+                .filter_map(|x| Version::parse(x).ok())
+                .filter(|x| version_required.matches(x))
+                .max();
+            let specific_version = latest_matching_version
+                .ok_or_else(|| eyre!("Version {} could not be found", version))?
                 .to_string();
             let url = api
-                .pointer(&format!("/{}{}", real_version, arch)).ok_or_else(_e_arch)?
-                .as_str().ok_or_eyre(_e)?.to_string();
-            Ok((real_version, url))
+                .pointer(&format!("/{}{}", specific_version, tarball))
+                .ok_or_else(_e_arch)?
+                .as_str()
+                .ok_or_eyre(_e)?
+                .to_string();
+            let shasum = api
+                .pointer(&format!("/{}{}", specific_version, sha))
+                .ok_or_else(_e_arch)?
+                .as_str()
+                .ok_or_eyre(_e)?
+                .to_string();
+            Ok((specific_version, url, shasum))
         }
     }
 }
 
-// fn make_shims()
+fn add_dropins(destination: &Path, dropins: [&str; 8]) -> Result<()> {
+    for x in dropins {
+        let file = format!("#!/bin/bash\nexec zig {} \"$@\"", x);
+        let path = destination.join("zig-".to_string() + x);
+        write(&path, file)?;
+        set_permissions(&path, Permissions::from_mode(0o755))?;
+    }
+    Ok(())
+}
+
+fn rm_dropins(destination: &Path, dropins: [&str; 8]) -> Result<()> {
+    for x in dropins {
+        let path = destination.join("zig-".to_string() + x);
+        match remove_file(&path) {
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => bail!(e),
+            Ok(_) => {}
+        };
+    }
+    Ok(())
+}
+
+fn make_symlink(source: &Path, destination: &Path, no_dropins: bool) -> Result<()> {
+    let dropins = [
+        "ar", "cc", "c++", "dlltool", "lib", "ranlib", "objcopy", "rc",
+    ];
+    match symlink(source.join("zig"), destination.join("zig")) {
+        Ok(_) => {
+            println!("Zig added at {:?}", destination);
+            if !no_dropins {
+                add_dropins(destination, dropins)?;
+                println!(
+                    "Zig drop-in tools {} added",
+                    dropins.map(|x| "zig-".to_string() + x).join(", ")
+                );
+            }
+            if !var("PATH")?.contains(destination.to_str().ok_or_eyre("Cannot check path")?) {
+                println!(
+                    "Add {:?} to your PATH. Seems like it's not in PATH",
+                    destination
+                );
+            };
+        }
+        Err(e) if e.kind() == ErrorKind::PermissionDenied => {
+            bail!("Permission denied to create symlink at {:?}. Do NOT RUN as root. Try passing a custom symlink directory with --link option", destination)
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            create_dir_all(destination)?;
+            make_symlink(source, destination, no_dropins)?;
+        }
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+            println!("Replacing Zig at {:?}", destination);
+            remove_file(destination.join("zig"))?;
+            rm_dropins(destination, dropins)?;
+            make_symlink(source, destination, no_dropins)?;
+        }
+        Err(e) => bail!(e),
+    };
+    Ok(())
+}
+
+async fn download_tarxz(url: &str) -> Result<PathBuf> {
+    let temp = temp_dir();
+    let dl = Download::try_from(url)?;
+    let file_path = temp.join(&dl.filename);
+    let mut style = StyleOptions::default();
+    style.set_main(ProgressBarOpts::hidden());
+    dbg!(&style);
+    let downloader = DownloaderBuilder::new()
+        .directory(temp)
+        // .(Duration::from_secs(20))
+        .concurrent_downloads(4)
+        // .timeout(Duration::from_secs(60))
+        .style_options(style)
+        .build();
+    match downloader.download(&[dl]).await[0].status() {
+        Status::Success => {}
+        x => bail!("Download status {:?}", x),
+    };
+    Ok(file_path)
+}
+
+fn check_sha256(file: &PathBuf, hash: String) -> Result<()> {
+    let mut file = File::open(file)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0; 4096];
+    loop {
+        let bytes_read = file.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
+    let x = format!("{:x}", hasher.finalize());
+    ensure!(hash == x);
+    Ok(())
+}
+
+fn extract_tarxz(
+    file: &Path,
+    install_location: &Path,
+    version_install_location: &Path,
+) -> Result<()> {
+    let _e = || eyre!("Extracting {:?} failed", file);
+    let xz = XzDecoder::new(File::open(file).wrap_err_with(_e)?);
+    let mut tar = Archive::new(xz);
+    tar.unpack(install_location)?;
+    let file_name = file
+        .file_name()
+        .ok_or_else(_e)?
+        .to_str()
+        .ok_or_else(_e)?
+        .replacen(".tar.xz", "", 1);
+    let unpacked_folder = install_location.join(file_name);
+    rename(unpacked_folder, version_install_location).wrap_err_with(_e)?;
+    Ok(())
+}
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let default_install = ProjectDirs::from("com", "", "zman").ok_or_eyre("Default project dir could not be selected")?
-        .data_dir()
-        .canonicalize()?;
-    // TODO: Elevation
-    let default_link = PathBuf::from("/usr/bin");
+    let x = ProjectDirs::from("com", "", "zman")
+        .ok_or_eyre("Default project directory could not be selected")?;
+    let install_default = x.data_dir();
+    let x = BaseDirs::new().ok_or_eyre("User home directory could not be found")?;
+    let link_default = x
+        .executable_dir()
+        .ok_or_eyre("Local bin directory could not be found")?;
 
     match cli.cmd {
         Cmd::Default {
             install,
             link,
-            user,
             no_dropins,
             version,
         } => {
-            let install_location =  match link {
-                None if user => BaseDirs::new().ok_or_eyre("$HOME could not be found")?
-                    .executable_dir().ok_or_eyre("Local bin dir could not be found")?
-                    .canonicalize()?,
-                None => default_install,
+            // link_location: ./local/bin/ -symlink-> version_link_location
+            // install_location: ./local/share/zman/
+            // version_install_location: ./local/share/zman/0.11.0/ or ./local/share/zman/master/
+            // Not Implemented - version_link_location: ./local/share/zman/bin/
+
+            let link_location = match &link {
                 Some(x) => x,
+                None => link_default,
+            };
+            let install_location = match &install {
+                Some(x) => x,
+                None => install_default,
             };
 
-            let (real_version, url) = parse_ziglang_api(&version)?;
-            let version_install_location = install_location.join(real_version);
-            if version_install_location.try_exists().wrap_err_with(|| eyre!("Cannot check if {:?} exists", version_install_location))? {
-                // TODO: make shims
-
+            let (specific_version, url, shasum) = parse_ziglang_api(&version)?;
+            let version_install_location = install_location.join(&specific_version);
+            if version_install_location
+                .join("zig")
+                .try_exists()
+                .wrap_err_with(|| {
+                    eyre!("Cannot check if {:?} already downloaded", specific_version)
+                })?
+            {
+                println!("Zig version {} already downloaded", specific_version);
+                make_symlink(&version_install_location, link_location, no_dropins)?;
             } else {
-                // TODO: download zig
+                let rt = Runtime::new()?;
+                let archive = rt
+                    .block_on(download_tarxz(&url))
+                    .wrap_err_with(|| eyre!("Downloading {:?} failed", specific_version))?;
+                match check_sha256(&archive, shasum) {
+                    Ok(_) => {}
+                    Err(_) => {
+                        remove_file(&archive)?;
+                        bail!("Checksum failed for {:?}", specific_version)
+                    }
+                };
+                extract_tarxz(&archive, install_location, &version_install_location)?;
+                println!("Downloaded {:?}", specific_version);
+                make_symlink(&version_install_location, link_location, no_dropins)?;
             }
         }
         Cmd::Fetch { .. } => bail!("Not implemented"),

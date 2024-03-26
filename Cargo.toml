@@ -1,22 +1,32 @@
 [package]
 name = "zman"
-version = "0.1.0"
 edition = "2021"
+version = "0.1.0"
 description = "Manage Zig installations"
 
 [dependencies]
-clap = { version = "4.5.3", features = ["derive", "color", "wrap_help"] }
 directories = "5.0.1"
-duma = "0.2.0"
 eyre = "0.6.12"
-reqwest = { version = "0.12.1", features = ["blocking", "json"] }
+manic = { version = "0.8.1", default-features = false, features = ["threaded", "rustls", "progress"] }
 semver = "1.0.22"
 serde_json = "1.0.114"
-tempfile = "3.10.1"
+sha2 = "0.10.8"
+tar = "0.4.40"
+tokio = "1.36.0"
+xz2 = "0.1.7"
+
+[dependencies.clap]
+version = "4.5.3"
+features = ["usage", "wrap_help", "help", "error-context", "color", "std", "derive"]
+default-features = false
+
+[dependencies.reqwest]
+version = "0.12.1"
+features = ["blocking", "json"]
 
 [profile.release]
 opt-level = "z"
-strip = true
 lto = true
 codegen-units = 1
 panic = "abort"
+strip = true
