@@ -41,5 +41,5 @@ zman clean 0.12.0 # Running simply clean won't remove 0.12.0
 zman run 0.12.0 build --host-target x86_64-macos
 ```
 ## Todo
-- Add package manager functionality global and local
+- Add package manager functionality globally
 - Pin a specific version to a folder
