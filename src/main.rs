@@ -1,25 +1,25 @@
 mod download;
 
 use clap::{value_parser, ColorChoice, Parser, Subcommand, ValueHint};
+use console::Term;
 use directories::{BaseDirs, ProjectDirs};
+use download::download_file;
 use eyre::{bail, ensure, eyre, OptionExt, Result, WrapErr};
+use fs_extra::dir::{copy, CopyOptions};
+use reqwest::Client;
 use semver::{Version, VersionReq};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::env::consts::{ARCH, OS};
 use std::env::var;
-use std::fs::{create_dir_all, remove_file, write, File, set_permissions, Permissions, read_dir};
+use std::fs::{create_dir_all, read_dir, remove_file, set_permissions, write, File, Permissions};
 use std::io::{ErrorKind, Read};
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 use tar::Archive;
-use xz2::read::XzDecoder;
-use download::download_file;
-use console::Term;
-use reqwest::Client;
-use tokio::runtime::Runtime;
 use temp_dir::TempDir;
-use fs_extra::dir::{copy, CopyOptions};
+use tokio::runtime::Runtime;
+use xz2::read::XzDecoder;
 
 #[derive(Parser)]
 #[command(version, about, color = ColorChoice::Auto, help_expected = true, disable_help_subcommand = true, long_about = None)]
@@ -148,10 +148,13 @@ async fn parse_ziglang_api(client: &Client, version: &str) -> Result<(String, St
     let sha = format!("/{}-{}/shasum", ARCH, OS);
     let _e_arch = || eyre!("Zig binary for {} target not available", tarball);
 
-    let api = client.get("https://ziglang.org/download/index.json")
-        .send().await
+    let api = client
+        .get("https://ziglang.org/download/index.json")
+        .send()
+        .await
         .wrap_err_with(|| "Cannot connect to ziglang.org API")?
-        .json::<Value>().await
+        .json::<Value>()
+        .await
         .wrap_err_with(|| _e)?;
 
     match version {
@@ -293,15 +296,15 @@ fn make_symlink(source: &Path, destination: &Path, no_dropins: bool) -> Result<(
             if !var("PATH")?.contains(destination.to_str().ok_or_eyre("Path Invalid")?) {
                 println!("Add it to PATH");
             };
-        },
+        }
         Err(e) if e.kind() == ErrorKind::PermissionDenied => {
             bail!("Permission denied to create symlink at {:?}. Do NOT RUN as root. Try passing a custom symlink directory with --link option", destination)
-        },
+        }
         Err(e) if e.kind() == ErrorKind::AlreadyExists => {
             remove_file(destination.join("zig"))?;
             rm_dropins(destination, dropins)?;
             make_symlink(source, destination, no_dropins)?;
-        },
+        }
         Err(e) => bail!(e),
     };
     Ok(())
@@ -323,7 +326,11 @@ fn check_sha256(file: &PathBuf, hash: String) -> Result<()> {
     Ok(())
 }
 
-fn extract_and_copy(file: &Path, extract_location: PathBuf, install_location: &PathBuf) -> Result<()> {
+fn extract_and_copy(
+    file: &Path,
+    extract_location: PathBuf,
+    install_location: &PathBuf,
+) -> Result<()> {
     let _e = || eyre!("Extracting {:?} failed", file);
     let xz = XzDecoder::new(File::open(file).wrap_err_with(_e)?);
     let mut tar = Archive::new(xz);
@@ -336,7 +343,9 @@ fn extract_and_copy(file: &Path, extract_location: PathBuf, install_location: &P
     let mut opts = CopyOptions::new();
     opts.overwrite = true;
     opts.content_only = true;
-    let inside_dir = read_dir(extract_location)?.next().ok_or_eyre("Extracted directory not found")??;
+    let inside_dir = read_dir(extract_location)?
+        .next()
+        .ok_or_eyre("Extracted directory not found")??;
     create_dir_all(install_location)?;
     copy(inside_dir.path(), install_location, &opts)?;
     t.clear_line()?;
@@ -378,26 +387,30 @@ fn main() -> Result<()> {
             let client = Client::new();
             let rt = Runtime::new()?;
 
-            let (specific_version, url, shasum) = rt.block_on(parse_ziglang_api(&client, &version))?;
+            let (specific_version, url, shasum) =
+                rt.block_on(parse_ziglang_api(&client, &version))?;
             let specific_install_location = if "master" == &version {
                 install_location.join("master")
             } else {
                 install_location.join(&specific_version)
             };
-            if version != "master" && specific_install_location
-                .join("zig")
-                .try_exists()
-                .wrap_err_with(|| {
-                    eyre!("Cannot check if {:?} already downloaded", specific_version)
-                })?
+            if version != "master"
+                && specific_install_location
+                    .join("zig")
+                    .try_exists()
+                    .wrap_err_with(|| {
+                        eyre!("Cannot check if {:?} already downloaded", specific_version)
+                    })?
             {
                 println!("Zig version {} already downloaded", specific_version);
             } else {
                 let temp = TempDir::with_prefix("zman")?;
                 let extract_location = temp.child(&version);
                 let tarxz = temp.child(format!("zig-{}.tar.xz", version));
-                rt.block_on(download_file(&client, &url, &tarxz)).wrap_err_with(|| eyre!("Downloading {:?} failed", specific_version))?;
-                check_sha256(&tarxz, shasum).wrap_err_with(|| eyre!("Checksum failed for {:?}", specific_version))?;
+                rt.block_on(download_file(&client, &url, &tarxz))
+                    .wrap_err_with(|| eyre!("Downloading {:?} failed", specific_version))?;
+                check_sha256(&tarxz, shasum)
+                    .wrap_err_with(|| eyre!("Checksum failed for {:?}", specific_version))?;
                 extract_and_copy(&tarxz, extract_location, &specific_install_location)?;
             }
             make_symlink(&specific_install_location, link_location, no_dropins)?;

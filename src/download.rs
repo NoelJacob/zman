@@ -1,12 +1,12 @@
 // https://github.com/DemwE/rgetd/tree/main/src/download.rs
 
+use eyre::{bail, Result};
+use indicatif::{ProgressBar, ProgressStyle};
+use reqwest::Client;
 use reqwest::Url;
 use std::fs::File;
-use std::io::{Write, BufWriter};
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
-use indicatif::{ProgressBar, ProgressStyle};
-use eyre::{Result, bail};
-use reqwest::Client;
 
 pub async fn download_file(client: &Client, url: &str, save_path: &PathBuf) -> Result<()> {
     // Parse URL
@@ -19,7 +19,8 @@ pub async fn download_file(client: &Client, url: &str, save_path: &PathBuf) -> R
     }
 
     // Make GET request
-    let mut response = client.get(url.clone())
+    let mut response = client
+        .get(url.clone())
         .header("Range", format!("bytes={}-", start))
         .send()
         .await?;
