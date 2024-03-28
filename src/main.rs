@@ -259,9 +259,9 @@ async fn parse_ziglang_api(client: &Client, version: &str) -> Result<(String, St
     }
 }
 
-fn add_dropins(destination: &Path, dropins: [&str; 8]) -> Result<()> {
+fn add_dropins(destination: &Path, dropins: [&str; 8], zig_location: PathBuf) -> Result<()> {
     for x in dropins {
-        let file = format!("#!/bin/bash\nexec zig {} \"$@\"", x);
+        let file = format!("#!/bin/bash\nexec {:?} {} \"$@\"", zig_location, x);
         let path = destination.join("zig-".to_string() + x);
         write(&path, file)?;
         set_permissions(&path, Permissions::from_mode(0o755))?;
@@ -290,7 +290,7 @@ fn make_symlink(source: &Path, destination: &Path, no_dropins: bool) -> Result<(
         Ok(_) => {
             print!("Zig added at {:?}", destination);
             if !no_dropins {
-                add_dropins(destination, dropins)?;
+                add_dropins(destination, dropins, source.join("zig"))?;
                 println!(" with drop-in tools");
             }
             if !var("PATH")?.contains(destination.to_str().ok_or_eyre("Path Invalid")?) {
