@@ -1,8 +1,9 @@
 [package]
 name = "zman"
 edition = "2021"
-version = "0.1.0"
+version = "0.2.0"
 description = "Manage Zig installations"
+license = "Apache-2.0"
 
 [dependencies]
 directories = "5.0.1"

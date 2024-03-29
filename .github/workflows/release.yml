@@ -1,0 +1,27 @@
+name: Release Package
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "*"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rs/toolchain@v1.0.6
+        with:
+          toolchain: nightly
+          override: true
+      - run: cargo build --release
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: ./target/release/zman
+      - uses: katyo/publish-crates@v2
+        with:
+          registry-token: ${{ secrets.CRATES }}
