@@ -1,28 +1,36 @@
-mod download;
+use std::env::consts::{ARCH, OS};
+use std::env::var;
+use std::fs::{
+    create_dir_all, read_dir, read_to_string, remove_dir_all, remove_file, set_permissions, write,
+    File, Permissions,
+};
+use std::io::{ErrorKind, Read};
+use std::os::unix::fs::{symlink, PermissionsExt};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use clap::{value_parser, ColorChoice, Parser, Subcommand, ValueHint};
 use console::Term;
 use directories::{BaseDirs, ProjectDirs};
-use download::download_file;
 use eyre::{bail, ensure, eyre, OptionExt, Result, WrapErr};
 use fs_extra::dir::{copy, CopyOptions};
 use reqwest::Client;
 use semver::{Version, VersionReq};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::env::consts::{ARCH, OS};
-use std::env::var;
-use std::fs::{create_dir_all, read_dir, remove_file, set_permissions, write, File, Permissions};
-use std::io::{ErrorKind, Read};
-use std::os::unix::fs::{symlink, PermissionsExt};
-use std::path::{Path, PathBuf};
 use tar::Archive;
 use temp_dir::TempDir;
 use tokio::runtime::Runtime;
 use xz2::read::XzDecoder;
 
+use download::download_file;
+
+mod download;
+
 #[derive(Parser)]
-#[command(version, about, color = ColorChoice::Auto, help_expected = true, disable_help_subcommand = true, long_about = None)]
+#[command(
+    version, about, color = ColorChoice::Auto, help_expected = true, disable_help_subcommand = true, long_about = None
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -32,10 +40,14 @@ struct Cli {
 enum Cmd {
     /// Download and set a Zig version as default.
     Default {
-        #[arg(long, value_parser = value_parser!(PathBuf), value_hint = ValueHint::DirPath, value_name = "DIR")]
+        #[arg(
+            long, value_parser = value_parser ! (PathBuf), value_hint = ValueHint::DirPath, value_name = "DIR"
+        )]
         /// Custom installation directory.
         install: Option<PathBuf>,
-        #[arg(long, value_parser = value_parser!(PathBuf), value_hint = ValueHint::DirPath, value_name = "DIR")]
+        #[arg(
+            long, value_parser = value_parser ! (PathBuf), value_hint = ValueHint::DirPath, value_name = "DIR"
+        )]
         /// Custom symlink directory.
         link: Option<PathBuf>,
         #[arg(long)]
@@ -46,7 +58,9 @@ enum Cmd {
     },
     /// Download a zig version.
     Fetch {
-        #[arg(long, value_parser = value_parser!(PathBuf), value_hint = ValueHint::DirPath, value_name = "DIR")]
+        #[arg(
+            long, value_parser = value_parser ! (PathBuf), value_hint = ValueHint::DirPath, value_name = "DIR"
+        )]
         /// Custom installation directory.
         install: Option<PathBuf>,
         /// Exact version number or use latest for latest release or master for latest build.
@@ -68,7 +82,9 @@ enum Cmd {
     Run {
         /// Exact version name or use latest for latest release and master for latest build.
         version: String,
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_hint = ValueHint::CommandWithArguments)]
+        #[arg(
+            trailing_var_arg = true, allow_hyphen_values = true, value_hint = ValueHint::CommandWithArguments
+        )]
         /// Arguments to invoke Zig with.
         args: Vec<String>,
     },
@@ -365,21 +381,20 @@ fn main() -> Result<()> {
 
     match cli.cmd {
         Cmd::Default {
-            install,
-            link,
-            no_dropins,
-            version,
+            ref install,
+            ref version,
+            ..
+        }
+        | Cmd::Fetch {
+            ref install,
+            ref version,
         } => {
             // link_location: ./local/bin/ -symlink-> version_link_location
             // install_location: ./local/share/zman/
             // version_install_location: ./local/share/zman/0.11.0/ or ./local/share/zman/master/
             // Not Implemented - version_link_location: ./local/share/zman/bin/
 
-            let link_location = match &link {
-                Some(x) => x,
-                None => link_default,
-            };
-            let install_location = match &install {
+            let install_location = match install {
                 Some(x) => x,
                 None => install_default,
             };
@@ -388,8 +403,8 @@ fn main() -> Result<()> {
             let rt = Runtime::new()?;
 
             let (specific_version, url, shasum) =
-                rt.block_on(parse_ziglang_api(&client, &version))?;
-            let specific_install_location = if "master" == &version {
+                rt.block_on(parse_ziglang_api(&client, version))?;
+            let specific_install_location = if "master" == version {
                 install_location.join("master")
             } else {
                 install_location.join(&specific_version)
@@ -405,7 +420,7 @@ fn main() -> Result<()> {
                 println!("Zig version {} already downloaded", specific_version);
             } else {
                 let temp = TempDir::with_prefix("zman")?;
-                let extract_location = temp.child(&version);
+                let extract_location = temp.child(version);
                 let tarxz = temp.child(format!("zig-{}.tar.xz", version));
                 rt.block_on(download_file(&client, &url, &tarxz))
                     .wrap_err_with(|| eyre!("Downloading {:?} failed", specific_version))?;
@@ -413,13 +428,90 @@ fn main() -> Result<()> {
                     .wrap_err_with(|| eyre!("Checksum failed for {:?}", specific_version))?;
                 extract_and_copy(&tarxz, extract_location, &specific_install_location)?;
             }
-            make_symlink(&specific_install_location, link_location, no_dropins)?;
+            if let Cmd::Default {
+                ref link,
+                no_dropins,
+                ..
+            } = cli.cmd
+            {
+                let link_location = match link {
+                    Some(x) => x,
+                    None => link_default,
+                };
+                make_symlink(&specific_install_location, link_location, no_dropins)?;
+                write(install_default.join("default.txt"), version)?;
+            }
         }
-        Cmd::Fetch { .. } => bail!("Not implemented"),
-        Cmd::Clean { .. } => bail!("Not implemented"),
-        Cmd::List => bail!("Not implemented"),
-        Cmd::Keep { .. } => bail!("Not implemented"),
-        Cmd::Run { .. } => bail!("Not implemented"),
+        Cmd::Clean { version } => {
+            let default = read_to_string(install_default.join("default.txt"))?;
+            let k = read_to_string(install_default.join("keep.txt"))?;
+            let keeps: Vec<&str> = k.split("\n").collect();
+            match version {
+                Some(v) if v == default => {
+                    bail!("Cannot remove default version. Set some other version as default and try again")
+                }
+                Some(v) => {
+                    remove_dir_all(install_default.join(&v))?;
+                    println!("{:?} removed", install_default.join(v));
+                }
+                None => {
+                    let list = read_dir(install_default)?;
+                    for f in list {
+                        let folder = f?;
+                        let filename = folder.file_name();
+                        if filename != "master"
+                            && filename != default.as_str()
+                            && filename != "default.txt"
+                            && filename != "keep.txt"
+                            && !keeps.contains(
+                                &filename
+                                    .to_str()
+                                    .ok_or_else(|| eyre!("Cannot convert filenames to string"))?,
+                            )
+                        {
+                            remove_dir_all(folder.path())?;
+                            println!("{:?} removed", folder.path());
+                        }
+                    }
+                }
+            }
+        }
+        Cmd::List => {
+            let folders = read_dir(install_default)?;
+            for f in folders {
+                let filename = f?.file_name();
+                if filename != "default.txt" || filename != "keep.txt" {
+                    println!("{:?}", filename);
+                };
+            }
+            let default = read_to_string(install_default.join("default.txt"))?;
+            println!("Default version: {}", default);
+            let keeps = read_to_string(install_default.join("keep.txt"))?
+                .split("\n")
+                .collect::<Vec<&str>>()
+                .join(", ");
+            println!("Saved from cleaning: {}", keeps);
+        }
+        Cmd::Keep { version } => match read_to_string(install_default.join("keep.txt")) {
+            Ok(v) => write(
+                install_default.join("keep.txt"),
+                format!("{}\n{}", v, version),
+            )?,
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                write(install_default.join("keep.txt"), version)?
+            }
+            Err(e) => bail!(e),
+        },
+        Cmd::Run { version, args } => {
+            let output = Command::new(install_default.join(version).join("zig"))
+                .args(args)
+                .output()?;
+            if output.status.success() {
+                println!("{}", String::from_utf8_lossy(&output.stdout));
+            } else {
+                eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+            }
+        }
     }
 
     Ok(())
