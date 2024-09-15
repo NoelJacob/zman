@@ -4,6 +4,9 @@ edition = "2021"
 version = "0.2.0"
 description = "Manage Zig installations"
 license = "Apache-2.0"
+authors = ["Noel Jacob <noeljacob91@gmail.com>"]
+repository = "https://github.com/NoelJacob/zman"
+keywords = ["Zig", "Version"]
 
 [dependencies]
 directories = "5.0.1"
